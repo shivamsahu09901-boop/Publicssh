@@ -1,64 +1,89 @@
-import socket
-import _thread
-import sys
+#!/bin/bash
 
-def connection(clt_conn, addr):
-    try:
-        clt_conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        clt_conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
-        clt_conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
-        
-        request = clt_conn.recv(4096).decode('utf-8', errors='ignore')
-        
-        if "Upgrade: websocket" in request or "HTTP/1.1" in request:
-            color_payload = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
-            clt_conn.sendall(color_payload)
-            
-            srv_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv_conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            srv_conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
-            srv_conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
-            srv_conn.connect(('127.0.0.1', 22))
-            
-            _thread.start_new_thread(forward, (clt_conn, srv_conn))
-            forward(srv_conn, clt_conn)
-    except:
-        pass
+# यहाँ अपने गिटहब की डिटेल्स डाल देना ताकि स्क्रिप्ट आपकी रेपो से फाइल्स डाउनलोड कर सके
+GITHUB_USER="shivamsahu09901-boop"
+REPO_NAME="Publicssh"
 
-def forward(src, dst):
-    try:
-        while True:
-            data = src.recv(16384)
-            if not data: 
-                break
-            dst.sendall(data)
-    except:
-        pass
-    finally:
-        try: src.close()
-        except: pass
-        try: dst.close()
-        except: pass
+# रूट यूजर चेक
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run this script as root!"
+  exit 1
+fi
 
-def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 80
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    try:
-        server.bind(('0.0.0.0', port))
-    except Exception as e:
-        print(f"Port Bind Error: {e}")
-        return
+clear
+echo "=================================================="
+echo "      STARTING ONE-CLICK WEBSOCKET INSTALLER      "
+echo "=================================================="
+sleep 2
 
-    server.listen(4096)
-    while True:
-        try:
-            clt_conn, addr = server.accept()
-            _thread.start_new_thread(connection, (clt_conn, addr))
-        except:
-            pass
+# 1. पोर्ट 80 और 443 को साफ़ करना (Kill/Stop Existing Web Servers)
+echo "[*] Cleaning ports 80 and 443..."
+systemctl stop nginx apache2 lsws 2>/dev/null
+systemctl disable nginx apache2 lsws 2>/dev/null
+apt-get remove --purge -y nginx nginx-common apache2 apache2-utils 2>/dev/null
+apt-get autoremove -y 2>/dev/null
 
-if __name__ == '__main__':
-    main()
-    
+# पोर्ट 80 और 443 पर चल रहे किसी भी प्रोसेस को जबरन बंद करना
+fuser -k 80/tcp 2>/dev/null
+fuser -k 443/tcp 2>/dev/null
+
+# 2. सिस्टम अपडेट और जरूरी पैकेज इंस्टॉल करना
+echo "[*] Installing dependencies..."
+apt-get update -y
+apt-get install -y python3 python3-pip screen dropbear curl fail2ban ufw
+
+# 3. /bin/false को शेल लिस्ट में जोड़ना
+grep -qxF '/bin/false' /etc/shells || echo '/bin/false' >> /etc/shells
+
+# 4. डिफ़ॉल्ट OpenSSH को पोर्ट 22 से रोकना (ताकि Dropbear 22 पर चल सके)
+echo "[*] Disabling default OpenSSH socket on Port 22..."
+systemctl stop ssh.socket 2>/dev/null
+systemctl disable ssh.socket 2>/dev/null
+systemctl mask ssh.socket 2>/dev/null
+
+# 5. Dropbear कॉन्फ़िगर करना
+echo "[*] Configuring Dropbear SSH Server..."
+sed -i 's/NO_START=1/NO_START=0/g' /etc/default/dropbear
+sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=22/g' /etc/default/dropbear
+sed -i 's/DROPBEAR_BANNER=""/DROPBEAR_BANNER="\/etc\/issue.net"/g' /etc/default/dropbear
+
+# Dropbear Override कॉन्फ़िगरेशन बनाना (फोर्स बैनर और पोर्ट 22)
+mkdir -p /etc/systemd/system/dropbear.service.d
+cat << 'EOF' > /etc/systemd/system/dropbear.service.d/override.conf
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/dropbear -F -E -b /etc/issue.net -p 22
+EOF
+
+# डिफ़ॉल्ट बैनर बनाना
+echo -e "WebSocket Tunneling Server\nSupport: @Apimakergast" > /etc/issue.net
+
+systemctl daemon-reload
+systemctl enable dropbear
+systemctl restart dropbear
+
+# 6. Python Websocket Proxy सेटअप करना
+echo "[*] Downloading and starting Python Proxy..."
+pkill -f proxy.py 2>/dev/null
+
+# गिटहब से प्रॉक्सी डाउनलोड करना
+curl -s -o /usr/local/bin/proxy.py "https://raw.githubusercontent.com/${GITHUB_USER}/${REPO_NAME}/main/proxy.py"
+chmod +x /usr/local/bin/proxy.py
+
+# बैकग्राउंड में स्क्रीन के अंदर प्रॉक्सी को रन करना (पोर्ट 80 पर)
+screen -dmS ws_proxy python3 /usr/local/bin/proxy.py 80
+
+# 7. SSH Management Panel (Menu) सेटअप करना
+echo "[*] Installing SSH Panel..."
+curl -s -o /usr/bin/menu "https://raw.githubusercontent.com/${GITHUB_USER}/${REPO_NAME}/main/menu.sh"
+chmod +x /usr/bin/menu
+
+clear
+echo "=================================================="
+echo "✔ INSTALLATION COMPLETED SUCCESSFULLY!"
+echo "=================================================="
+echo "• Dropbear running on: Port 22"
+echo "• Python Proxy running on: Port 80"
+echo ""
+echo "👉 Type 'menu' in terminal to open the Admin Panel!"
+echo "=================================================="
